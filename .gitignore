@@ -1,0 +1,33 @@
+# Environment variables (contains sensitive tokens)
+.env
+*.env
+
+# Google Sheets credentials (sensitive)
+credentials.json
+
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Bot data files
+scheduled_events.json
+*.log
+
+# Temporary files
+temp_poster_*
+*.tmp
+
