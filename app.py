@@ -56,7 +56,7 @@ def get_google_sheets_client():
         print(f"❌ Error initializing Google Sheets client: {e}")
         return None
 
-async def log_warzone_assignments_to_sheet(round_type: str, assignments: list):
+async def log_warzone_assignments_to_sheet(round_type: str, assignments: list, tournament_type: str = "Main"):
     """Log warzone assignments to Google Sheets"""
     try:
         client = get_google_sheets_client()
@@ -66,11 +66,23 @@ async def log_warzone_assignments_to_sheet(round_type: str, assignments: list):
 
         spreadsheet = client.open_by_key(GOOGLE_SHEETS_CONFIG["spreadsheet_id"])
         
+        # Determine which worksheet to use based on round progression
+        sheet_mapping = {
+            "r1": "1.0",   # Round 1 winners go to 1.0 sheet
+            "r2": "2.0",   # Round 2 winners go to 2.0 sheet  
+            "r3": "3.0",   # Round 3 winners go to 3.0 sheet
+            "r4": "4.0",   # Round 4 winners go to 4.0 sheet
+            "r5": "5.0"    # Round 5 winners go to 5.0 sheet
+        }
+        
+        target_worksheet = sheet_mapping.get(round_type, "1.0")
+        
         try:
-            worksheet = spreadsheet.worksheet(GOOGLE_SHEETS_CONFIG["worksheet_name"])
+            worksheet = spreadsheet.worksheet(target_worksheet)
+            print(f"✅ Using worksheet: {target_worksheet}")
         except gspread.WorksheetNotFound:
             worksheet = spreadsheet.get_worksheet(0)
-            print(f"⚠️ Worksheet '{GOOGLE_SHEETS_CONFIG['worksheet_name']}' not found, using first available worksheet")
+            print(f"⚠️ Worksheet '{target_worksheet}' not found, using first available worksheet")
         
         rows_to_add = []
         
@@ -109,7 +121,7 @@ async def log_warzone_assignments_to_sheet(round_type: str, assignments: list):
         
         if rows_to_add:
             worksheet.append_rows(rows_to_add)
-            print(f"✅ Logged {len(rows_to_add)} assignments to Google Sheets")
+            print(f"✅ Logged {len(rows_to_add)} assignments to Google Sheets worksheet: {target_worksheet}")
             return True
         
         return False
@@ -129,6 +141,14 @@ ROLE_IDS = {
     "main_judge": 1051425023962919013,       # Can use winners command to post result and team balance
     "super_admin": 1125379786383044638,      # All access
     "admin": 1291348778200207431             # All access
+}
+
+# Tournament Role IDs
+TOURNAMENT_ROLES = {
+    "joined_main": "1194644728755519549",           # Replace with actual role ID
+    "joined_parallel": "1194644860939022366",   # Replace with actual role ID
+    "round1_main": "1195645662965010492",           # Replace with actual role ID
+    "round1_parallel": "1195646439573946439"    # Replace with actual role ID
 }
 
 # Warzone Role and Channel Mappings
@@ -389,13 +409,24 @@ async def warzone_cc_all(
     warzone_members = []
     
     if round_type.value == "r1":
-        # For R1, get all members with any warzone role (initial participants)
-        for role_id, mapping in WARZONE_MAPPINGS.items():
-            role = discord.utils.get(interaction.guild.roles, id=int(role_id))
-            if role:
-                warzone_members.extend(role.members)
+        # For R1, get all members with Round1 roles (from check-in)
+        round1_main_id = TOURNAMENT_ROLES.get("round1_main")
+        round1_parallel_id = TOURNAMENT_ROLES.get("round1_parallel")
+        
+        if round1_main_id.startswith("ROUND1_") or round1_parallel_id.startswith("ROUND1_"):
+            await interaction.followup.send("❌ Round1 role IDs not configured. Please update TOURNAMENT_ROLES in the code.", ephemeral=True)
+            return
+        
+        # Get Round1 role objects
+        round1_main_role = discord.utils.get(interaction.guild.roles, id=int(round1_main_id))
+        round1_parallel_role = discord.utils.get(interaction.guild.roles, id=int(round1_parallel_id))
+        
+        if round1_main_role:
+            warzone_members.extend(round1_main_role.members)
+        if round1_parallel_role:
+            warzone_members.extend(round1_parallel_role.members)
     else:
-        # For R2+, get members with the appropriate progression role
+        # For R2+, get members with the appropriate progression role (2.0, 3.0, 4.0, 5.0)
         progression_role_id = PROGRESSION_ROLES.get(ROUND_PROGRESSION[round_type.value]["next_progression"])
         if progression_role_id and not progression_role_id.startswith("PROGRESSION_ROLE_"):
             progression_role = discord.utils.get(interaction.guild.roles, id=int(progression_role_id))
@@ -835,9 +866,16 @@ async def support_ars(
 
 @tree.command(name="sunday-check-in", description="Sunday check-in for players")
 @app_commands.describe(
-    level="Player's ingame level"
+    level="Player's ingame level",
+    tournament_type="Tournament type to join"
 )
-async def sunday_check_in(interaction: discord.Interaction, level: int):
+@app_commands.choices(
+    tournament_type=[
+        app_commands.Choice(name="Main Tournament", value="main"),
+        app_commands.Choice(name="Parallel Tournament", value="parallel")
+    ]
+)
+async def sunday_check_in(interaction: discord.Interaction, level: int, tournament_type: app_commands.Choice[str]):
     """Sunday check-in command for players"""
     
     await interaction.response.defer(ephemeral=True)
@@ -848,38 +886,71 @@ async def sunday_check_in(interaction: discord.Interaction, level: int):
         return
 
     try:
+        # Get tournament roles
+        joined_role_id = TOURNAMENT_ROLES.get(f"joined_{tournament_type.value}")
+        round1_role_id = TOURNAMENT_ROLES.get(f"round1_{tournament_type.value}")
+        
+        if joined_role_id.startswith("JOINED_") or round1_role_id.startswith("ROUND1_"):
+            await interaction.followup.send(f"❌ Tournament role IDs not configured. Please update TOURNAMENT_ROLES in the code.", ephemeral=True)
+            return
+        
+        # Get role objects
+        joined_role = discord.utils.get(interaction.guild.roles, id=int(joined_role_id))
+        round1_role = discord.utils.get(interaction.guild.roles, id=int(round1_role_id))
+        
+        if not joined_role or not round1_role:
+            await interaction.followup.send(f"❌ Tournament roles not found. Please check role configuration.", ephemeral=True)
+            return
+        
+        # Check if user already has Joined role
+        if joined_role in interaction.user.roles:
+            await interaction.followup.send(f"❌ You have already checked in for {tournament_type.value.title()} tournament!", ephemeral=True)
+            return
+        
+        # Add Joined role and Round1 role
+        await interaction.user.add_roles(joined_role, round1_role)
+        
         # Create check-in embed
         embed = discord.Embed(
             title="📅 Sunday Check-In",
-            description=f"**Player:** {interaction.user.display_name}\n**Discord:** {interaction.user.mention}\n**Username:** {interaction.user.name}\n**Ingame Level:** {level}",
+            description=f"**Player:** {interaction.user.display_name}\n**Discord:** {interaction.user.mention}\n**Username:** {interaction.user.name}\n**Ingame Level:** {level}\n**Tournament:** {tournament_type.value.title()}",
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow()
         )
         
         embed.add_field(
             name="📊 Check-In Details",
-            value=f"**Date:** {datetime.datetime.now().strftime('%A, %B %d, %Y')}\n**Time:** {datetime.datetime.now().strftime('%H:%M UTC')}\n**Status:** ✅ Checked In",
+            value=f"**Date:** {datetime.datetime.now().strftime('%A, %B %d, %Y')}\n**Time:** {datetime.datetime.now().strftime('%H:%M UTC')}\n**Status:** ✅ Checked In\n**Roles Added:** {joined_role.mention}, {round1_role.mention}",
             inline=False
         )
         
         embed.set_footer(text="Sunday Check-In • 😈The Devil's Spot😈")
         
         # Send confirmation to user
-        await interaction.followup.send("✅ Sunday check-in completed successfully!", ephemeral=True)
+        await interaction.followup.send("✅ Sunday check-in completed successfully! You are now registered for the tournament.", ephemeral=True)
         
         # Log to support channel
-        details = f"Sunday Check-In (Level: {level})"
+        details = f"Sunday Check-In {tournament_type.value.title()} Tournament (Level: {level})"
         await log_to_support_channel(interaction.user, details)
         
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Bot doesn't have permission to assign roles.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ An error occurred during check-in: {str(e)}", ephemeral=True)
         print(f"Error in sunday_check_in command: {e}")
 
 @tree.command(name="saturday-check-in", description="Saturday check-in for players")
 @app_commands.describe(
-    level="Player's ingame level"
+    level="Player's ingame level",
+    tournament_type="Tournament type to join"
 )
-async def saturday_check_in(interaction: discord.Interaction, level: int):
+@app_commands.choices(
+    tournament_type=[
+        app_commands.Choice(name="Main Tournament", value="main"),
+        app_commands.Choice(name="Parallel Tournament", value="parallel")
+    ]
+)
+async def saturday_check_in(interaction: discord.Interaction, level: int, tournament_type: app_commands.Choice[str]):
     """Saturday check-in command for players"""
     
     await interaction.response.defer(ephemeral=True)
@@ -890,32 +961,148 @@ async def saturday_check_in(interaction: discord.Interaction, level: int):
         return
     
     try:
+        # Get tournament roles
+        joined_role_id = TOURNAMENT_ROLES.get(f"joined_{tournament_type.value}")
+        round1_role_id = TOURNAMENT_ROLES.get(f"round1_{tournament_type.value}")
+        
+        if joined_role_id.startswith("JOINED_") or round1_role_id.startswith("ROUND1_"):
+            await interaction.followup.send(f"❌ Tournament role IDs not configured. Please update TOURNAMENT_ROLES in the code.", ephemeral=True)
+            return
+        
+        # Get role objects
+        joined_role = discord.utils.get(interaction.guild.roles, id=int(joined_role_id))
+        round1_role = discord.utils.get(interaction.guild.roles, id=int(round1_role_id))
+        
+        if not joined_role or not round1_role:
+            await interaction.followup.send(f"❌ Tournament roles not found. Please check role configuration.", ephemeral=True)
+            return
+        
+        # Check if user already has Joined role
+        if joined_role in interaction.user.roles:
+            await interaction.followup.send(f"❌ You have already checked in for {tournament_type.value.title()} tournament!", ephemeral=True)
+            return
+        
+        # Add Joined role and Round1 role
+        await interaction.user.add_roles(joined_role, round1_role)
+        
         # Create check-in embed
         embed = discord.Embed(
             title="📅 Saturday Check-In",
-            description=f"**Player:** {interaction.user.display_name}\n**Discord:** {interaction.user.mention}\n**Username:** {interaction.user.name}\n**Ingame Level:** {level}",
+            description=f"**Player:** {interaction.user.display_name}\n**Discord:** {interaction.user.mention}\n**Username:** {interaction.user.name}\n**Ingame Level:** {level}\n**Tournament:** {tournament_type.value.title()}",
             color=discord.Color.green(),
             timestamp=discord.utils.utcnow()
         )
         
         embed.add_field(
             name="📊 Check-In Details",
-            value=f"**Date:** {datetime.datetime.now().strftime('%A, %B %d, %Y')}\n**Time:** {datetime.datetime.now().strftime('%H:%M UTC')}\n**Status:** ✅ Checked In",
+            value=f"**Date:** {datetime.datetime.now().strftime('%A, %B %d, %Y')}\n**Time:** {datetime.datetime.now().strftime('%H:%M UTC')}\n**Status:** ✅ Checked In\n**Roles Added:** {joined_role.mention}, {round1_role.mention}",
             inline=False
         )
         
         embed.set_footer(text="Saturday Check-In • 😈The Devil's Spot😈")
         
         # Send confirmation to user
-        await interaction.followup.send("✅ Saturday check-in completed successfully!", ephemeral=True)
+        await interaction.followup.send("✅ Saturday check-in completed successfully! You are now registered for the tournament.", ephemeral=True)
         
         # Log to support channel
-        details = f"Saturday Check-In (Level: {level})"
+        details = f"Saturday Check-In {tournament_type.value.title()} Tournament (Level: {level})"
         await log_to_support_channel(interaction.user, details)
         
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Bot doesn't have permission to assign roles.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ An error occurred during check-in: {str(e)}", ephemeral=True)
         print(f"Error in saturday_check_in command: {e}")
+
+@tree.command(name="remove-joined-roles", description="Remove Joined roles after check-in period ends")
+@app_commands.describe(
+    tournament_type="Tournament type to remove roles from"
+)
+@app_commands.choices(
+    tournament_type=[
+        app_commands.Choice(name="Main Tournament", value="main"),
+        app_commands.Choice(name="Parallel Tournament", value="parallel"),
+        app_commands.Choice(name="Both Tournaments", value="both")
+    ]
+)
+async def remove_joined_roles(interaction: discord.Interaction, tournament_type: app_commands.Choice[str]):
+    """Remove Joined roles after check-in period ends"""
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check permissions
+    if not has_event_result_permission(interaction):
+        await interaction.followup.send("❌ You need **Commander**, **Main Judge**, **Super Admin**, or **Admin** role to use this command.", ephemeral=True)
+        return
+    
+    try:
+        roles_to_remove = []
+        
+        if tournament_type.value in ["main", "both"]:
+            main_joined_id = TOURNAMENT_ROLES.get("joined_main")
+            if not main_joined_id.startswith("JOINED_"):
+                main_joined_role = discord.utils.get(interaction.guild.roles, id=int(main_joined_id))
+                if main_joined_role:
+                    roles_to_remove.append(main_joined_role)
+        
+        if tournament_type.value in ["parallel", "both"]:
+            parallel_joined_id = TOURNAMENT_ROLES.get("joined_parallel")
+            if not parallel_joined_id.startswith("JOINED_"):
+                parallel_joined_role = discord.utils.get(interaction.guild.roles, id=int(parallel_joined_id))
+                if parallel_joined_role:
+                    roles_to_remove.append(parallel_joined_role)
+        
+        if not roles_to_remove:
+            await interaction.followup.send("❌ Tournament role IDs not configured. Please update TOURNAMENT_ROLES in the code.", ephemeral=True)
+            return
+        
+        # Find all members with these roles
+        total_removed = 0
+        for role in roles_to_remove:
+            for member in role.members:
+                try:
+                    await member.remove_roles(role)
+                    total_removed += 1
+                except discord.Forbidden:
+                    print(f"Error: Bot doesn't have permission to remove role {role.name} from {member.display_name}")
+                except Exception as e:
+                    print(f"Error removing role from {member.display_name}: {e}")
+        
+        # Create confirmation embed
+        embed = discord.Embed(
+            title="🧹 Joined Roles Cleanup",
+            description=f"**Tournament Type:** {tournament_type.value.title()}\n**Roles Removed:** {len(roles_to_remove)}\n**Total Members Affected:** {total_removed}",
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow()
+        )
+        
+        embed.add_field(
+            name="📋 Removed Roles",
+            value="\n".join([f"• {role.name}" for role in roles_to_remove]),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="👨‍⚖️ Staff",
+            value=f"**Cleaned up by:** {interaction.user.mention}",
+            inline=False
+        )
+        
+        embed.set_footer(text="Tournament Cleanup • 😈The Devil's Spot😈")
+        
+        # Send to channel
+        await interaction.channel.send(embed=embed)
+        
+        # Send confirmation to user
+        await interaction.followup.send(f"✅ Successfully removed Joined roles for {tournament_type.value.title()} tournament from {total_removed} members.", ephemeral=True)
+        
+        # Log to support channel
+        details = f"Removed Joined roles for {tournament_type.value.title()} tournament"
+        await log_to_support_channel(interaction.user, details)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ An error occurred: {str(e)}", ephemeral=True)
+        print(f"Error in remove_joined_roles command: {e}")
 
 # ===========================================================================================
 # BOT STARTUP
