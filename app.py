@@ -1,5 +1,4 @@
 import discord
-import discord
 from discord import app_commands
 from discord.ext import commands
 import os
@@ -268,18 +267,228 @@ async def on_ready():
     print(f"🆔 Bot ID: {bot.user.id}")
     print(f"📊 Connected to {len(bot.guilds)} guild(s)")
     
-    # Sync commands with timeout handling
-    try:
-        print("🔄 Syncing slash commands...")
-        synced = await asyncio.wait_for(tree.sync(), timeout=30.0)
-        print(f"✅ Synced {len(synced)} command(s)")
-    except asyncio.TimeoutError:
-        print("⚠️ Command sync timed out, but bot will continue running")
-    except Exception as e:
-        print(f"❌ Error syncing commands: {e}")
-        print("⚠️ Bot will continue running without command sync")
+    # List connected guilds for debugging
+    for guild in bot.guilds:
+        print(f"   - {guild.name} (ID: {guild.id})")
+    
+    # Check bot permissions in guilds
+    for guild in bot.guilds:
+        bot_member = guild.get_member(bot.user.id)
+        if bot_member:
+            print(f"🔐 Bot permissions in {guild.name}:")
+            print(f"   - Administrator: {bot_member.guild_permissions.administrator}")
+            print(f"   - Manage Roles: {bot_member.guild_permissions.manage_roles}")
+            print(f"   - Use Slash Commands: {bot_member.guild_permissions.use_slash_commands}")
+    
+    # Sync commands with timeout handling and retry logic
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            print(f"🔄 Syncing slash commands (attempt {attempt + 1}/{max_retries})...")
+            
+            # Clear existing commands first (helps with Railway deployments)
+            if attempt == 0:
+                print("🧹 Clearing existing commands...")
+                tree.clear_commands()
+            
+            synced = await asyncio.wait_for(tree.sync(), timeout=45.0)
+            print(f"✅ Successfully synced {len(synced)} command(s)")
+            
+            # List synced commands for debugging
+            if synced:
+                print("📝 Synced commands:")
+                for command in synced:
+                    print(f"   - /{command.name}: {command.description}")
+            else:
+                print("⚠️ No commands were synced!")
+            
+            # Verify commands are actually registered
+            await asyncio.sleep(2)  # Wait a bit for Discord to process
+            registered_commands = await tree.fetch_commands()
+            print(f"🔍 Verified {len(registered_commands)} commands are registered with Discord")
+            
+            break  # Success, exit retry loop
+            
+        except asyncio.TimeoutError:
+            print(f"⚠️ Command sync timed out on attempt {attempt + 1}")
+            if attempt == max_retries - 1:
+                print("❌ All sync attempts timed out")
+        except discord.Forbidden:
+            print("❌ Bot doesn't have permission to sync commands.")
+            print("🔧 Make sure bot was invited with 'applications.commands' scope!")
+            break  # Don't retry permission errors
+        except discord.HTTPException as e:
+            print(f"❌ HTTP error syncing commands: {e}")
+            if "rate limited" in str(e).lower():
+                print("⏳ Rate limited, waiting before retry...")
+                await asyncio.sleep(10)
+            elif attempt == max_retries - 1:
+                print("❌ All sync attempts failed with HTTP errors")
+        except Exception as e:
+            print(f"❌ Error syncing commands: {e}")
+            if attempt == max_retries - 1:
+                print("❌ All sync attempts failed")
+        
+        if attempt < max_retries - 1:
+            print(f"🔄 Retrying in 5 seconds...")
+            await asyncio.sleep(5)
     
     print("🎯 Bot is ready to receive commands!")
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Handle command errors"""
+    print(f"❌ Command error: {error}")
+    if isinstance(error, commands.CommandNotFound):
+        return  # Ignore command not found errors
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission to use this command.")
+    elif isinstance(error, commands.BotMissingPermissions):
+        await ctx.send("❌ I don't have the required permissions to execute this command.")
+    else:
+        await ctx.send(f"❌ An error occurred: {str(error)}")
+
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Handle slash command errors"""
+    print(f"❌ Slash command error: {error}")
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        await interaction.response.send_message("❌ I don't have the required permissions to execute this command.", ephemeral=True)
+    else:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"❌ An error occurred: {str(error)}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"❌ An error occurred: {str(error)}", ephemeral=True)
+
+# ===========================================================================================
+# MANUAL COMMAND SYNC (FOR DEBUGGING)
+# ===========================================================================================
+
+@tree.command(name="sync-commands", description="Manually sync slash commands (Admin only)")
+async def sync_commands(interaction: discord.Interaction):
+    """Manually sync slash commands - useful for debugging"""
+    
+    # Check if user has admin permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ You need Administrator permissions to use this command.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        print("🔄 Manual command sync initiated...")
+        synced = await tree.sync()
+        print(f"✅ Manually synced {len(synced)} command(s)")
+        
+        command_list = "\n".join([f"• /{cmd.name}" for cmd in synced])
+        await interaction.followup.send(
+            f"✅ **Command Sync Successful!**\n"
+            f"**Synced {len(synced)} commands:**\n"
+            f"```\n{command_list}\n```\n"
+            f"Commands should now be visible in Discord. If not, try:\n"
+            f"1. Restart Discord client\n"
+            f"2. Check bot permissions\n"
+            f"3. Wait a few minutes for Discord to update",
+            ephemeral=True
+        )
+        
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ **Permission Error**\n"
+            "Bot doesn't have permission to sync commands.\n"
+            "Make sure the bot has `applications.commands` scope and proper permissions.",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error syncing commands: {str(e)}", ephemeral=True)
+        print(f"❌ Manual sync error: {e}")
+
+@tree.command(name="bot-status", description="Check bot permissions and status (Admin only)")
+async def bot_status(interaction: discord.Interaction):
+    """Check bot permissions and status - useful for debugging"""
+    
+    # Check if user has admin permissions
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ You need Administrator permissions to use this command.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        guild = interaction.guild
+        bot_member = guild.get_member(bot.user.id)
+        
+        if not bot_member:
+            await interaction.followup.send("❌ Bot member not found in guild!", ephemeral=True)
+            return
+        
+        # Check permissions
+        perms = bot_member.guild_permissions
+        
+        # Get current commands
+        current_commands = await tree.fetch_commands()
+        
+        embed = discord.Embed(
+            title="🤖 Bot Status & Permissions",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow()
+        )
+        
+        embed.add_field(
+            name="📊 Basic Info",
+            value=f"**Bot:** {bot.user.mention}\n**Guild:** {guild.name}\n**Bot ID:** {bot.user.id}",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🔐 Key Permissions",
+            value=f"**Administrator:** {'✅' if perms.administrator else '❌'}\n"
+                  f"**Use Slash Commands:** {'✅' if perms.use_slash_commands else '❌'}\n"
+                  f"**Manage Roles:** {'✅' if perms.manage_roles else '❌'}\n"
+                  f"**Manage Channels:** {'✅' if perms.manage_channels else '❌'}\n"
+                  f"**Send Messages:** {'✅' if perms.send_messages else '❌'}",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⚡ Command Status",
+            value=f"**Registered Commands:** {len(current_commands)}\n"
+                  f"**Commands Visible:** {'✅ Yes' if len(current_commands) > 0 else '❌ No commands found'}",
+            inline=False
+        )
+        
+        if len(current_commands) > 0:
+            command_names = [f"• /{cmd.name}" for cmd in current_commands[:10]]  # Show first 10
+            if len(current_commands) > 10:
+                command_names.append(f"... and {len(current_commands) - 10} more")
+            
+            embed.add_field(
+                name="📝 Registered Commands",
+                value="\n".join(command_names),
+                inline=False
+            )
+        
+        # Add troubleshooting tips
+        if len(current_commands) == 0:
+            embed.add_field(
+                name="🔧 Troubleshooting",
+                value="**No commands found!** Try:\n"
+                      "1. Use `/sync-commands` to manually sync\n"
+                      "2. Check bot was invited with `applications.commands` scope\n"
+                      "3. Restart Discord client\n"
+                      "4. Wait a few minutes for Discord to update",
+                inline=False
+            )
+        
+        embed.set_footer(text="Bot Status Check")
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error checking bot status: {str(e)}", ephemeral=True)
+        print(f"❌ Bot status check error: {e}")
 
 # ===========================================================================================
 # TEAM MANAGEMENT COMMAND
